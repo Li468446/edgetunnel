@@ -1,4 +1,12 @@
-name = "v20250807"
+# wrangler.toml
+name = 'cf-pass-1-xfq'
 main = "_worker.js"
 compatibility_date = "2025-08-07"
+
 keep_vars = true
+# wrangler.toml (wrangler v3.88.0^)
+[observability.logs]
+enabled = true
+
+
+
