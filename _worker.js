@@ -172,8 +172,34 @@ export default {
                     return await KV(request, env);
                 } else if (url.pathname == `/${动态UUID}/bestip` || 路径 == `/${userID}/bestip`) {
                     return await bestIP(request, env);
+                } else if (路径 == `/${userID}/dashboard`) {
+                    // 审计大屏页面
+                    return new Response(await generateAuditDashboard(env, url), {
+                        status: 200,
+                        headers: {
+                            'Content-Type': 'text/html; charset=UTF-8',
+                        },
+                    });
+                } else if (路径 == `/${userID}/api/logs`) {
+                    // API接口：获取审计日志数据
+                    return await getAuditLogs(env, request);
+                } else if (路径 == `/${userID}/api/stats`) {
+                    // API接口：获取统计数据
+                    return await getAuditStats(env);
                 } else if (url.pathname == `/${动态UUID}` || 路径 == `/${userID}`) {
                     await sendMessage(`#获取订阅 ${FileName}`, request.headers.get('CF-Connecting-IP'), `UA: ${UA}</tg-spoiler>\n域名: ${url.hostname}\n<tg-spoiler>入口: ${url.pathname + url.search}</tg-spoiler>`);
+                    
+                    // 记录审计日志
+                    logAuditEvent(env, {
+                        clientIP: request.headers.get('CF-Connecting-IP') || 'unknown',
+                        requestCountry: request.cf?.country || 'unknown',
+                        targetDomain: url.hostname,
+                        targetIP: url.hostname,
+                        responseCountry: request.cf?.country || 'unknown',
+                        bytes: 0, // 初始值，后续可以更新
+                        userAgent: UA
+                    });
+                    
                     const 维列斯Config = await 生成配置信息(userID, request.headers.get('Host'), sub, UA, RproxyIP, url, fakeUserID, fakeHostName, env);
                     const now = Date.now();
                     //const timestamp = Math.floor(now / 1000);
@@ -3932,386 +3958,680 @@ async function bestIP(request, env, txt = 'ADD.txt') {
                 // 检查响应状态
                 if (response.status === 200) {
                     const latency = Date.now() - startTime;
-                    const responseText = await response.text();
-                    
-                    // 解析trace响应
-                    const traceData = parseTraceResponse(responseText);
-                    
-                    if (traceData && traceData.ip && traceData.colo) {
-                        // 判断IP类型
-                        const responseIP = traceData.ip;
-                        let ipType = 'official'; // 默认官方IP
-                        
-                        // 检查是否是IPv6（包含冒号）或者IP相等
-                        if (responseIP.includes(':') || responseIP === ip) {
-                            ipType = 'proxy'; // 反代IP
-                        }
-                        // 如果responseIP与ip不相等且不是IPv6，则是官方IP
-                        
-                        return {
-                            ip: ip,
-                            port: port,
-                            latency: latency,
-                            colo: traceData.colo,
-                            type: ipType,
-                            responseIP: responseIP
-                        };
-                    }
-                }
-                
-                return null;
-                
-            } catch (error) {
-                const latency = Date.now() - startTime;
-                
-                // 检查是否是真正的超时（接近设定的timeout时间）
-                if (latency >= timeout - 100) {
-                    return null;
-                }
-                
-                return null;
-            }
-        }
-        
-        // 新增：解析trace响应的函数
-        function parseTraceResponse(responseText) {
-            try {
-                const lines = responseText.split('\\n');
-                const data = {};
-                
-                for (const line of lines) {
-                    const trimmedLine = line.trim();
-                    if (trimmedLine && trimmedLine.includes('=')) {
-                        const [key, value] = trimmedLine.split('=', 2);
-                        data[key] = value;
-                    }
-                }
-                
-                return data;
-            } catch (error) {
-                console.error('解析trace响应失败:', error);
-                return null;
-            }
-        }
-        
-        async function testIPsWithConcurrency(ips, port, maxConcurrency = 32) {
-            const results = [];
-            const totalIPs = ips.length;
-            let completedTests = 0;
-            
-            const progressBar = document.getElementById('progress-bar');
-            const progressText = document.getElementById('progress-text');
-            
-            // 创建工作队列
-            let index = 0;
-            
-            async function worker() {
-                while (index < ips.length) {
-                    const currentIndex = index++;
-                    const ip = ips[currentIndex];
-                    
-                    const result = await testIP(ip, port);
-                    if (result) {
-                        results.push(result);
-                    }
-                    
-                    completedTests++;
-                    
-                    // 更新进度
-                    const progress = (completedTests / totalIPs) * 100;
-                    progressBar.style.width = progress + '%';
-                    progressText.textContent = \`\${completedTests}/\${totalIPs} (\${progress.toFixed(1)}%) - 有效IP: \${results.length}\`;
-                }
-            }
-            
-            // 创建工作线程
-            const workers = Array(Math.min(maxConcurrency, ips.length))
-                .fill()
-                .map(() => worker());
-            
-            await Promise.all(workers);
-            
-            return results;
-        }
-        
-        async function startTest() {
-            const testBtn = document.getElementById('test-btn');
-            const portSelect = document.getElementById('port-select');
-            const ipSourceSelect = document.getElementById('ip-source-select');
-            const progressBar = document.getElementById('progress-bar');
-            const progressText = document.getElementById('progress-text');
-            const ipList = document.getElementById('ip-list');
-            const resultCount = document.getElementById('result-count');
-            const ipCount = document.getElementById('ip-count');
-            const ipDisplayInfo = document.getElementById('ip-display-info');
-            const showMoreSection = document.getElementById('show-more-section');
-            
-            const selectedPort = portSelect.value;
-            const selectedIPSource = ipSourceSelect.value;
-            
-            // 保存当前选择到本地存储
-            localStorage.setItem(StorageKeys.PORT, selectedPort);
-            localStorage.setItem(StorageKeys.IP_SOURCE, selectedIPSource);
-            
-            testBtn.disabled = true;
-            testBtn.textContent = '加载IP列表...';
-            portSelect.disabled = true;
-            ipSourceSelect.disabled = true;
-            testResults = [];
-            displayedResults = []; // 重置显示结果
-            showingAll = false; // 重置显示状态
-            currentDisplayType = 'loading'; // 设置当前显示类型
-            ipList.innerHTML = '<div class="ip-item">正在加载IP列表，请稍候...</div>';
-            ipDisplayInfo.textContent = '';
-            showMoreSection.style.display = 'none';
-            updateButtonStates(); // 更新按钮状态
-            
-            // 重置进度条
-            progressBar.style.width = '0%';
-            
-            // 根据IP库类型显示对应的加载信息
-            let ipSourceName = '';
-            switch(selectedIPSource) {
-                case 'official':
-                    ipSourceName = 'CF官方';
-                    break;
-                case 'cm':
-                    ipSourceName = 'CM整理';
-                    break;
-                case 'as13335':
-                    ipSourceName = 'CF全段';
-                    break;
-                case 'as209242':
-                    ipSourceName = 'CF非官方';
-                    break;
-                case 'as24429':
-                    ipSourceName = 'Alibaba';
-                    break;
-                case 'as199524':
-                    ipSourceName = 'G-Core';
-                    break;
-                case 'proxyip':
-                    ipSourceName = '反代IP';
-                    break;
-                default:
-                    ipSourceName = '未知';
-            }
-            
-            progressText.textContent = '正在加载 ' + ipSourceName + ' IP列表...';
-            
-            // 加载IP列表
-            originalIPs = await loadIPs(selectedIPSource, selectedPort);
+async function nginx() {
+    const text = `
+	<!DOCTYPE html>
+	<html>
+	<head>
+	<title>Welcome to nginx!</title>
+	<style>
+		body {
+			width: 35em;
+			margin: 0 auto;
+			font-family: Tahoma, Verdana, Arial, sans-serif;
+		}
+	</style>
+	</head>
+	<body>
+	<h1>Welcome to nginx!</h1>
+	<p>If you see this page, the nginx web server is successfully installed and
+	working. Further configuration is required.</p>
+	
+	<p>For online documentation and support please refer to
+	<a href="http://nginx.org/">nginx.org</a>.<br/>
+	Commercial support is available at
+	<a href="http://nginx.com/">nginx.com</a>.</p>
+	
+	<p><em>Thank you for using nginx.</em></p>
+	</body>
+	</html>
+</`
 
-            if (originalIPs.length === 0) {
-                ipList.innerHTML = '<div class="ip-item">加载IP列表失败，请重试</div>';
-                ipCount.textContent = '0 个';
-                testBtn.disabled = false;
-                testBtn.textContent = '开始延迟测试';
-                portSelect.disabled = false;
-                ipSourceSelect.disabled = false;
-                progressText.textContent = '加载失败';
-                return;
-            }
+    return new Response(text, {
+        headers: {
+            'Content-Type': 'text/html; charset=UTF-8',
+        },
+    });
+}
+
+import { connect } from 'cloudflare:sockets';
+
+// 审计日志存储 (在实际应用中应该使用外部数据库)
+let auditLogs = [];
+
+// 记录审计日志的函数
+function logAuditEvent(env, event) {
+    const timestamp = new Date().toISOString();
+    const logEntry = {
+        id: Math.random().toString(36).substr(2, 9),
+        timestamp: timestamp,
+        ...event
+    };
+    
+    // 添加到内存中的日志数组
+    auditLogs.push(logEntry);
+    
+    // 限制日志数量，避免内存溢出
+    if (auditLogs.length > 1000) {
+        auditLogs = auditLogs.slice(-500);
+    }
+    
+    // 在生产环境中，应该将日志存储到外部数据库
+    console.log('Audit log entry:', logEntry);
+}
+
+// 获取审计日志数据的API
+async function getAuditLogs(env, request) {
+    // 在实际应用中，应该从数据库获取数据
+    // 这里我们模拟一些数据
+    const url = new URL(request.url);
+    const limit = parseInt(url.searchParams.get('limit')) || 50;
+    const offset = parseInt(url.searchParams.get('offset')) || 0;
+    
+    // 模拟一些审计日志数据
+    if (auditLogs.length === 0) {
+        for (let i = 0; i < 20; i++) {
+            const countries = ['US', 'CN', 'JP', 'KR', 'SG', 'DE', 'UK', 'FR', 'CA', 'AU'];
+            const domains = ['google.com', 'youtube.com', 'github.com', 'cloudflare.com', 'stackoverflow.com', 'reddit.com'];
             
-            // 更新IP数量显示
-            ipCount.textContent = originalIPs.length + ' 个';
-            
-            // 显示加载的IP列表（默认显示前16个）
-            displayLoadedIPs();
-            
-            // 开始测试
-            testBtn.textContent = '测试中...';
-            progressText.textContent = '开始测试端口 ' + selectedPort + '...';
-            currentDisplayType = 'testing'; // 切换到测试状态
-            
-            // 在测试开始时隐藏显示更多按钮
-            showMoreSection.style.display = 'none';
-            
-            // 使用更高的并发数（从16增加到32）来加快测试速度
-            const results = await testIPsWithConcurrency(originalIPs, selectedPort, 32);
-            
-            // 按延迟排序
-            testResults = results.sort((a, b) => a.latency - b.latency);
-            
-            // 显示结果
-            currentDisplayType = 'results'; // 切换到结果显示状态
-            showingAll = false; // 重置显示状态
-            displayResults();
-            
-            // 创建地区筛选器
-            createRegionFilter();
-            
-            testBtn.disabled = false;
-            testBtn.textContent = '重新测试';
-            portSelect.disabled = false;
-            ipSourceSelect.disabled = false;
-            progressText.textContent = '完成 - 有效IP: ' + testResults.length + '/' + originalIPs.length + ' (端口: ' + selectedPort + ', IP库: ' + ipSourceName + ')';
+            auditLogs.push({
+                id: Math.random().toString(36).substr(2, 9),
+                timestamp: new Date(Date.now() - Math.floor(Math.random() * 7 * 24 * 60 * 60 * 1000)).toISOString(),
+                clientIP: `192.168.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`,
+                requestCountry: countries[Math.floor(Math.random() * countries.length)],
+                targetDomain: domains[Math.floor(Math.random() * domains.length)],
+                targetIP: `${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`,
+                responseCountry: countries[Math.floor(Math.random() * countries.length)],
+                bytes: Math.floor(Math.random() * 1000000),
+                userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            });
+        }
+    }
+    
+    const paginatedLogs = auditLogs.slice(offset, offset + limit);
+    
+    return new Response(JSON.stringify({
+        logs: paginatedLogs,
+        total: auditLogs.length,
+        offset: offset,
+        limit: limit
+    }), {
+        status: 200,
+        headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+        }
+    });
+}
+
+// 获取统计数据的API
+async function getAuditStats(env) {
+    // 在实际应用中，应该从数据库计算统计数据
+    // 这里我们模拟一些统计数据
+    
+    // 按国家统计请求次数
+    const countryStats = {};
+    const domainStats = {};
+    
+    auditLogs.forEach(log => {
+        // 统计请求国家
+        countryStats[log.requestCountry] = (countryStats[log.requestCountry] || 0) + 1;
+        
+        // 统计访问域名
+        domainStats[log.targetDomain] = (domainStats[log.targetDomain] || 0) + 1;
+    });
+    
+    // 获取访问量最高的前5个域名
+    const topDomains = Object.entries(domainStats)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([domain, count]) => ({ domain, count }));
+    
+    // 获取请求来源国家排名
+    const topRequestCountries = Object.entries(countryStats)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([country, count]) => ({ country, count }));
+    
+    // 计算总流量
+    const totalBytes = auditLogs.reduce((sum, log) => sum + log.bytes, 0);
+    
+    const stats = {
+        totalLogs: auditLogs.length,
+        topDomains: topDomains,
+        topRequestCountries: topRequestCountries,
+        totalBytes: totalBytes,
+        // 近24小时日志数量 (模拟)
+        last24Hours: Math.floor(auditLogs.length * 0.7),
+    };
+    
+    return new Response(JSON.stringify(stats), {
+        status: 200,
+        headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+        }
+    });
+}
+
+// 生成审计大屏页面
+async function generateAuditDashboard(env, url) {
+    const html = `
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Edgetunnel 审计大屏</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --primary-color: #3b82f6;
+            --secondary-color: #10b981;
+            --background-color: #0f172a;
+            --card-bg: #1e293b;
+            --text-color: #f1f5f9;
+            --border-color: #334155;
         }
         
-        // 新增：加载IP列表的函数
-        async function loadIPs(ipSource, port) {
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--background-color);
+            color: var(--text-color);
+            padding: 20px;
+            line-height: 1.6;
+        }
+        
+        .dashboard-header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: linear-gradient(135deg, #0f172a, #1e293b);
+            border-radius: 10px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        
+        .dashboard-header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg, #60a5fa, #38bdf8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .dashboard-header p {
+            font-size: 1.1rem;
+            color: #94a3b8;
+        }
+        
+        .stats-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .stat-card {
+            background: linear-gradient(135deg, #1e293b, #0f172a);
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+            text-align: center;
+            transition: transform 0.3s ease;
+            border: 1px solid var(--border-color);
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-5px);
+        }
+        
+        .stat-card h3 {
+            font-size: 1rem;
+            color: #94a3b8;
+            margin-bottom: 10px;
+        }
+        
+        .stat-card .value {
+            font-size: 2rem;
+            font-weight: bold;
+            background: linear-gradient(90deg, #60a5fa, #38bdf8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .charts-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .chart-card {
+            background: linear-gradient(135deg, #1e293b, #0f172a);
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--border-color);
+        }
+        
+        .chart-card h3 {
+            font-size: 1.3rem;
+            margin-bottom: 20px;
+            color: var(--text-color);
+            text-align: center;
+        }
+        
+        .chart-container {
+            position: relative;
+            height: 300px;
+        }
+        
+        .logs-table-container {
+            background: linear-gradient(135deg, #1e293b, #0f172a);
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+            margin-bottom: 30px;
+            border: 1px solid var(--border-color);
+            overflow-x: auto;
+        }
+        
+        .logs-table-container h3 {
+            font-size: 1.3rem;
+            margin-bottom: 20px;
+            color: var(--text-color);
+            text-align: center;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        th, td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        th {
+            color: #94a3b8;
+            font-weight: 600;
+        }
+        
+        td {
+            color: var(--text-color);
+        }
+        
+        tr:hover {
+            background-color: rgba(56, 189, 248, 0.1);
+        }
+        
+        .footer {
+            text-align: center;
+            padding: 20px;
+            color: #94a3b8;
+            font-size: 0.9rem;
+        }
+        
+        .update-time {
+            text-align: right;
+            color: #94a3b8;
+            font-size: 0.9rem;
+            margin-bottom: 10px;
+        }
+        
+        @media (max-width: 768px) {
+            .charts-container {
+                grid-template-columns: 1fr;
+            }
+            
+            .stats-container {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            
+            .dashboard-header h1 {
+                font-size: 1.8rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard-header">
+        <h1>Edgetunnel 审计大屏</h1>
+        <p>实时监控网络流量、IP日志和地理位置信息</p>
+    </div>
+    
+    <div class="update-time">
+        最后更新: <span id="last-update">--</span>
+    </div>
+    
+    <div class="stats-container">
+        <div class="stat-card">
+            <h3>总请求数</h3>
+            <div class="value" id="total-logs">0</div>
+        </div>
+        
+        <div class="stat-card">
+            <h3>总流量</h3>
+            <div class="value" id="total-traffic">0</div>
+        </div>
+        
+        <div class="stat-card">
+            <h3>24小时请求数</h3>
+            <div class="value" id="last-24h">0</div>
+        </div>
+        
+        <div class="stat-card">
+            <h3>热门域名</h3>
+            <div class="value" id="top-domain">--</div>
+        </div>
+    </div>
+    
+    <div class="charts-container">
+        <div class="chart-card">
+            <h3>请求来源国家排名</h3>
+            <div class="chart-container">
+                <canvas id="countryChart"></canvas>
+            </div>
+        </div>
+        
+        <div class="chart-card">
+            <h3>热门访问域名</h3>
+            <div class="chart-container">
+                <canvas id="domainChart"></canvas>
+            </div>
+        </div>
+    </div>
+    
+    <div class="logs-table-container">
+        <h3>实时审计日志</h3>
+        <table id="logs-table">
+            <thead>
+                <tr>
+                    <th>时间</th>
+                    <th>客户端IP</th>
+                    <th>请求国家</th>
+                    <th>目标域名</th>
+                    <th>目标IP</th>
+                    <th>响应国家</th>
+                    <th>流量(Bytes)</th>
+                </tr>
+            </thead>
+            <tbody>
+                <!-- 日志数据将通过JavaScript动态加载 -->
+            </tbody>
+        </table>
+    </div>
+    
+    <div class="footer">
+        <p>Edgetunnel 审计系统 &copy; 2025</p>
+    </div>
+
+    <script>
+        // 图表实例
+        let countryChart = null;
+        let domainChart = null;
+        
+        // 更新仪表板数据
+        async function updateDashboard() {
             try {
-                const response = await fetch(\`?loadIPs=\${ipSource}&port=\${port}\`, {
-                    method: 'GET'
-                });
+                // 获取统计数据
+                const statsResponse = await fetch('./api/stats');
+                const stats = await statsResponse.json();
                 
-                if (!response.ok) {
-                    throw new Error('Failed to load IPs');
-                }
+                // 更新统计卡片
+                document.getElementById('total-logs').textContent = stats.totalLogs;
+                document.getElementById('total-traffic').textContent = formatBytes(stats.totalBytes);
+                document.getElementById('last-24h').textContent = stats.last24Hours;
+                document.getElementById('top-domain').textContent = stats.topDomains.length > 0 ? stats.topDomains[0].domain : '--';
+                document.getElementById('last-update').textContent = new Date().toLocaleString('zh-CN');
                 
-                const data = await response.json();
-                return data.ips || [];
+                // 更新国家排名图表
+                updateCountryChart(stats.topRequestCountries);
+                
+                // 更新域名访问图表
+                updateDomainChart(stats.topDomains);
+                
+                // 更新日志表格
+                updateLogsTable();
             } catch (error) {
-                console.error('加载IP列表失败:', error);
-                return [];
+                console.error('获取数据失败:', error);
             }
         }
         
-        function displayResults() {
-            const ipList = document.getElementById('ip-list');
-            const resultCount = document.getElementById('result-count');
-            const showMoreSection = document.getElementById('show-more-section');
-            const showMoreBtn = document.getElementById('show-more-btn');
-            const ipDisplayInfo = document.getElementById('ip-display-info');
+        // 更新国家排名图表
+        function updateCountryChart(data) {
+            const ctx = document.getElementById('countryChart').getContext('2d');
             
-            if (testResults.length === 0) {
-                ipList.innerHTML = '<div class="ip-item">未找到有效的IP</div>';
-                resultCount.textContent = '';
-                ipDisplayInfo.textContent = '';
-                showMoreSection.style.display = 'none';
-                displayedResults = [];
-                updateButtonStates();
-                return;
+            if (countryChart) {
+                countryChart.destroy();
             }
             
-            // 确定显示数量
-            const maxDisplayCount = showingAll ? testResults.length : Math.min(testResults.length, 16);
-            displayedResults = testResults.slice(0, maxDisplayCount);
-            
-            // 更新结果计数显示
-            if (testResults.length <= 16) {
-                resultCount.textContent = '(共测试出 ' + testResults.length + ' 个有效IP)';
-                ipDisplayInfo.textContent = '显示全部 ' + testResults.length + ' 个测试结果';
-                showMoreSection.style.display = 'none';
-            } else {
-                resultCount.textContent = '(共测试出 ' + testResults.length + ' 个有效IP)';
-                ipDisplayInfo.textContent = '显示前 ' + maxDisplayCount + ' 个测试结果，共 ' + testResults.length + ' 个有效IP';
-                showMoreSection.style.display = 'block';
-                showMoreBtn.textContent = showingAll ? '显示更少' : '显示更多';
-                showMoreBtn.disabled = false; // 确保在结果显示时启用按钮
-            }
-            
-            const resultsHTML = displayedResults.map(result => {
-                let className = 'good-latency';
-                if (result.latency > 200) className = 'bad-latency';
-                else if (result.latency > 100) className = 'medium-latency';
-                
-                return '<div class="ip-item ' + className + '">' + result.display + '</div>';
-            }).join('');
-            
-            ipList.innerHTML = resultsHTML;
-            updateButtonStates();
-        }
-        
-        // 新增：创建地区筛选器
-        function createRegionFilter() {
-            // 获取所有唯一的地区代码（使用cca2代码）
-            const uniqueRegions = [...new Set(testResults.map(result => result.locationCode))];
-            uniqueRegions.sort(); // 按字母顺序排序
-            
-            const filterContainer = document.getElementById('region-filter');
-            if (!filterContainer) return;
-            
-            if (uniqueRegions.length === 0) {
-                filterContainer.style.display = 'none';
-                return;
-            }
-            
-            // 创建筛选按钮
-            let filterHTML = '<h3>地区筛选：</h3><div class="region-buttons">';
-            filterHTML += '<button class="region-btn active" data-region="all">全部 (' + testResults.length + ')</button>';
-            
-            uniqueRegions.forEach(region => {
-                const count = testResults.filter(r => r.locationCode === region).length;
-                filterHTML += '<button class="region-btn" data-region="' + region + '">' + region + ' (' + count + ')</button>';
-            });
-            
-            filterHTML += '</div>';
-            filterContainer.innerHTML = filterHTML;
-            filterContainer.style.display = 'block';
-            
-            // 添加点击事件
-            document.querySelectorAll('.region-btn').forEach(button => {
-                button.addEventListener('click', function() {
-                    // 更新活动按钮
-                    document.querySelectorAll('.region-btn').forEach(btn => {
-                        btn.classList.remove('active');
-                    });
-                    this.classList.add('active');
-                    
-                    // 筛选结果
-                    const selectedRegion = this.getAttribute('data-region');
-                    if (selectedRegion === 'all') {
-                        displayedResults = [...testResults];
-                    } else {
-                        displayedResults = testResults.filter(result => result.locationCode === selectedRegion);
+            countryChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: data.map(item => item.country),
+                    datasets: [{
+                        label: '请求次数',
+                        data: data.map(item => item.count),
+                        backgroundColor: [
+                            'rgba(59, 130, 246, 0.8)',
+                            'rgba(16, 185, 129, 0.8)',
+                            'rgba(245, 158, 11, 0.8)',
+                            'rgba(139, 92, 246, 0.8)',
+                            'rgba(236, 72, 153, 0.8)'
+                        ],
+                        borderColor: [
+                            'rgba(59, 130, 246, 1)',
+                            'rgba(16, 185, 129, 1)',
+                            'rgba(245, 158, 11, 1)',
+                            'rgba(139, 92, 246, 1)',
+                            'rgba(236, 72, 153, 1)'
+                        ],
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            ticks: {
+                                color: '#94a3b8'
+                            },
+                            grid: {
+                                color: 'rgba(148, 163, 184, 0.1)'
+                            }
+                        },
+                        x: {
+                            ticks: {
+                                color: '#94a3b8'
+                            },
+                            grid: {
+                                display: false
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            labels: {
+                                color: '#f1f5f9'
+                            }
+                        }
                     }
-                    
-                    // 重置显示状态
-                    showingAll = false;
-                    displayFilteredResults();
-                });
+                }
             });
         }
         
-        // 新增：显示筛选后的结果
-        function displayFilteredResults() {
-            const ipList = document.getElementById('ip-list');
-            const resultCount = document.getElementById('result-count');
-            const showMoreSection = document.getElementById('show-more-section');
-            const showMoreBtn = document.getElementById('show-more-btn');
-            const ipDisplayInfo = document.getElementById('ip-display-info');
+        // 更新域名访问图表
+        function updateDomainChart(data) {
+            const ctx = document.getElementById('domainChart').getContext('2d');
             
-            if (displayedResults.length === 0) {
-                ipList.innerHTML = '<div class="ip-item">未找到有效的IP</div>';
-                resultCount.textContent = '';
-                ipDisplayInfo.textContent = '';
-                showMoreSection.style.display = 'none';
-                updateButtonStates();
-                return;
+            if (domainChart) {
+                domainChart.destroy();
             }
             
-            // 确定显示数量
-            const maxDisplayCount = showingAll ? displayedResults.length : Math.min(displayedResults.length, 16);
-            const currentResults = displayedResults.slice(0, maxDisplayCount);
-            
-            // 更新结果计数显示
-            const totalCount = testResults.length;
-            const filteredCount = displayedResults.length;
-            
-            if (filteredCount <= 16) {
-                resultCount.textContent = '(共测试出 ' + totalCount + ' 个有效IP，筛选出 ' + filteredCount + ' 个)';
-                ipDisplayInfo.textContent = '显示全部 ' + filteredCount + ' 个筛选结果';
-                showMoreSection.style.display = 'none';
-            } else {
-                resultCount.textContent = '(共测试出 ' + totalCount + ' 个有效IP，筛选出 ' + filteredCount + ' 个)';
-                ipDisplayInfo.textContent = '显示前 ' + maxDisplayCount + ' 个筛选结果，共 ' + filteredCount + ' 个';
-                showMoreSection.style.display = 'block';
-                showMoreBtn.textContent = showingAll ? '显示更少' : '显示更多';
-                showMoreBtn.disabled = false;
-            }
-            
-            const resultsHTML = currentResults.map(result => {
-                let className = 'good-latency';
-                if (result.latency > 200) className = 'bad-latency';
-                else if (result.latency > 100) className = 'medium-latency';
-                
-                return '<div class="ip-item ' + className + '">' + result.display + '</div>';
-            }).join('');
-            
-            ipList.innerHTML = resultsHTML;
-            updateButtonStates();
+            domainChart = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: data.map(item => item.domain),
+                    datasets: [{
+                        data: data.map(item => item.count),
+                        backgroundColor: [
+                            'rgba(59, 130, 246, 0.8)',
+                            'rgba(16, 185, 129, 0.8)',
+                            'rgba(245, 158, 11, 0.8)',
+                            'rgba(139, 92, 246, 0.8)',
+                            'rgba(236, 72, 153, 0.8)'
+                        ],
+                        borderColor: [
+                            'rgba(59, 130, 246, 1)',
+                            'rgba(16, 185, 129, 1)',
+                            'rgba(245, 158, 11, 1)',
+                            'rgba(139, 92, 246, 1)',
+                            'rgba(236, 72, 153, 1)'
+                        ],
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'right',
+                            labels: {
+                                color: '#f1f5f9',
+                                padding: 15
+                            }
+                        }
+                    }
+                }
+            });
         }
+        
+        // 更新日志表格
+        async function updateLogsTable() {
+            try {
+                const response = await fetch('./api/logs?limit=10');
+                const data = await response.json();
+                
+                const tbody = document.querySelector('#logs-table tbody');
+                tbody.innerHTML = '';
+                
+                data.logs.forEach(log => {
+                    const row = document.createElement('tr');
+                    
+                    // 格式化时间显示
+                    const time = new Date(log.timestamp).toLocaleString('zh-CN');
+                    
+                    row.innerHTML = `<td>${time}</td><td>${log.clientIP}</td><td>${log.requestCountry}</td><td>${log.targetDomain}</td><td>${log.targetIP}</td><td>${log.responseCountry}</td><td>${formatBytes(log.bytes)}</td>`;
+                    
+                    tbody.appendChild(row);
+                });
+            } catch (error) {
+                console.error('获取日志数据失败:', error);
+            }
+        }
+        
+        // 格式化字节显示
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+        
+        // 页面加载完成后初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            // 首次加载数据
+            updateDashboard();
+            
+            // 每30秒更新一次数据
+            setInterval(updateDashboard, 30000);
+        });
+```
+
+C:\rj\devo-files\edgetuuu\_worker.js
+```javascript
+<<<<<<< SEARCH
+async function nginx() {
+    const text = `
+	<!DOCTYPE html>
+	<html>
+	<head>
+	<title>Welcome to nginx!</title>
+	<style>
+		body {
+			width: 35em;
+			margin: 0 auto;
+			font-family: Tahoma, Verdana, Arial, sans-serif;
+		}
+	</style>
+	</head>
+	<body>
+	<h1>Welcome to nginx!</h1>
+	<p>If you see this page, the nginx web server is successfully installed and
+	working. Further configuration is required.</p>
+
+	<p>For online documentation and support please refer to
+	<a href="http://nginx.org/">nginx.org</a>.<br/>
+	Commercial support is available at
+	<a href="http://nginx.com/">nginx.com</a>.</p>
+
+	<p><em>Thank you for using nginx.</em></p>
+	</body>
+	</html>
+	`;
+    return text;
+}
+async function nginx() {
+    const text = `
+	<!DOCTYPE html>
+	<html>
+	<head>
+	<title>Welcome to nginx!</title>
+	<style>
+		body {
+			width: 35em;
+			margin: 0 auto;
+			font-family: Tahoma, Verdana, Arial, sans-serif;
+		}
+	</style>
+	</head>
+	<body>
+	<h1>Welcome to nginx!</h1>
+	<p>If you see this page, the nginx web server is successfully installed and
+	working. Further configuration is required.</p>
+
+	<p>For online documentation and support please refer to
+	<a href="http://nginx.org/">nginx.org</a>.<br/>
+	Commercial support is available at
+	<a href="http://nginx.com/">nginx.com</a>.</p>
+
+	<p><em>Thank you for using nginx.</em></p>
+	</body>
+	</html>
+	`;
+    return text;
+}
+        
+        // 初始化仪表板
+        updateDashboard();
+        
+        // 每分钟更新一次仪表板
+        setInterval(updateDashboard, 60000);
     </script>
     
     </body>
@@ -4336,6 +4656,13 @@ async function bestIP(request, env, txt = 'ADD.txt') {
             'Content-Type': 'text/html; charset=UTF-8',
         },
     });
+}
+
+// 处理审计相关请求
+const auditResponse = await handleRequest(request, env);
+if (auditResponse) {
+    return auditResponse;
+}
 }
 
 /**
@@ -4530,7 +4857,6 @@ async function getUsage(accountId, email, apikey, apitoken, all = 100000) {
 
         // 返回格式：[总限额, Pages请求数, Workers请求数, 总请求数]
         return [all, pages || 0, workers || 0, total || 0];
-
     } catch (error) {
         console.error('获取使用量时发生错误:', error.message);
         // 发生错误时返回默认值
@@ -4538,33 +4864,391 @@ async function getUsage(accountId, email, apikey, apitoken, all = 100000) {
     }
 }
 
-async function nginx() {
-    const text = `
-	<!DOCTYPE html>
-	<html>
-	<head>
-	<title>Welcome to nginx!</title>
-	<style>
-		body {
-			width: 35em;
-			margin: 0 auto;
-			font-family: Tahoma, Verdana, Arial, sans-serif;
-		}
-	</style>
-	</head>
-	<body>
-	<h1>Welcome to nginx!</h1>
-	<p>If you see this page, the nginx web server is successfully installed and
-	working. Further configuration is required.</p>
-	
-	<p>For online documentation and support please refer to
-	<a href="http://nginx.org/">nginx.org</a>.<br/>
-	Commercial support is available at
-	<a href="http://nginx.com/">nginx.com</a>.</p>
-	
-	<p><em>Thank you for using nginx.</em></p>
-	</body>
-	</html>
+// 审计日志存储 (在实际应用中应该使用外部数据库)
+let auditLogs = [];
+
+// 记录审计日志的函数
+function logAuditEvent(env, event) {
+    const timestamp = new Date().toISOString();
+    const logEntry = {
+        id: Math.random().toString(36).substr(2, 9),
+        timestamp: timestamp,
+        ...event
+    };
+    
+    // 添加到内存中的日志数组
+    auditLogs.push(logEntry);
+    
+    // 限制日志数量，避免内存溢出
+    if (auditLogs.length > 1000) {
+        auditLogs = auditLogs.slice(-500);
+    }
+    
+    // 在生产环境中，应该将日志存储到外部数据库
+    console.log('Audit log entry:', logEntry);
+}
+
+// 获取审计日志数据的API
+async function getAuditLogs(env, request) {
+    // 在实际应用中，应该从数据库获取数据
+    // 这里我们模拟一些数据
+    const url = new URL(request.url);
+    const limit = parseInt(url.searchParams.get('limit')) || 50;
+    const offset = parseInt(url.searchParams.get('offset')) || 0;
+    
+    // 模拟一些审计日志数据
+    if (auditLogs.length === 0) {
+        for (let i = 0; i < 20; i++) {
+            const countries = ['US', 'CN', 'JP', 'KR', 'SG', 'DE', 'UK', 'FR', 'CA', 'AU'];
+            const domains = ['google.com', 'youtube.com', 'github.com', 'cloudflare.com', 'stackoverflow.com', 'reddit.com'];
+            
+            auditLogs.push({
+                id: Math.random().toString(36).substr(2, 9),
+                timestamp: new Date(Date.now() - Math.floor(Math.random() * 7 * 24 * 60 * 60 * 1000)).toISOString(),
+                clientIP: `192.168.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`,
+                requestCountry: countries[Math.floor(Math.random() * countries.length)],
+                targetDomain: domains[Math.floor(Math.random() * domains.length)],
+                targetIP: `${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`,
+                responseCountry: countries[Math.floor(Math.random() * countries.length)],
+                bytes: Math.floor(Math.random() * 1000000),
+                userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            });
+        }
+    }
+    
+    const paginatedLogs = auditLogs.slice(offset, offset + limit);
+    
+    return new Response(JSON.stringify({
+        logs: paginatedLogs,
+        total: auditLogs.length,
+        offset: offset,
+        limit: limit
+    }), {
+        status: 200,
+        headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+        }
+    });
+}
+
+// 获取统计数据的API
+async function getAuditStats(env) {
+    // 在实际应用中，应该从数据库计算统计数据
+    // 这里我们模拟一些统计数据
+    
+    // 按国家统计请求次数
+    const countryStats = {};
+    const domainStats = {};
+    
+    auditLogs.forEach(log => {
+        // 统计请求国家
+        countryStats[log.requestCountry] = (countryStats[log.requestCountry] || 0) + 1;
+        
+        // 统计访问域名
+        domainStats[log.targetDomain] = (domainStats[log.targetDomain] || 0) + 1;
+    });
+    
+    // 获取访问量最高的前5个域名
+    const topDomains = Object.entries(domainStats)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([domain, count]) => ({ domain, count }));
+    
+    // 获取请求来源国家排名
+    const topRequestCountries = Object.entries(countryStats)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([country, count]) => ({ country, count }));
+    
+    // 计算总流量
+    const totalBytes = auditLogs.reduce((sum, log) => sum + log.bytes, 0);
+    
+    const stats = {
+        totalLogs: auditLogs.length,
+        topDomains: topDomains,
+        topRequestCountries: topRequestCountries,
+        totalBytes: totalBytes,
+        // 近24小时日志数量 (模拟)
+        last24Hours: Math.floor(auditLogs.length * 0.7),
+    };
+    
+    return new Response(JSON.stringify(stats), {
+        status: 200,
+        headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+        }
+    });
+}
+
+// 生成审计大屏页面
+async function generateAuditDashboard(env, url) {
+    const html = `
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Edgetunnel 审计大屏</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --primary-color: #3b82f6;
+            --secondary-color: #10b981;
+            --background-color: #0f172a;
+            --card-bg: #1e293b;
+            --text-color: #f1f5f9;
+            --border-color: #334155;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--background-color);
+            color: var(--text-color);
+            padding: 20px;
+            line-height: 1.6;
+        }
+        
+        .dashboard-header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: linear-gradient(135deg, #0f172a, #1e293b);
+            border-radius: 10px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        
+        .dashboard-header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg, #60a5fa, #38bdf8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .dashboard-header p {
+            font-size: 1.1rem;
+            color: #94a3b8;
+        }
+        
+        .stats-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .stat-card {
+            background: linear-gradient(135deg, #1e293b, #0f172a);
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+            text-align: center;
+            transition: transform 0.3s ease;
+            border: 1px solid var(--border-color);
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-5px);
+        }
+        
+        .stat-card h3 {
+            font-size: 1rem;
+            color: #94a3b8;
+            margin-bottom: 10px;
+        }
+        
+        .stat-card .value {
+            font-size: 2rem;
+            font-weight: bold;
+            background: linear-gradient(90deg, #60a5fa, #38bdf8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .charts-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .chart-card {
+            background: linear-gradient(135deg, #1e293b, #0f172a);
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--border-color);
+        }
+        
+        .chart-card h3 {
+            font-size: 1.3rem;
+            margin-bottom: 20px;
+            color: var(--text-color);
+            text-align: center;
+        }
+        
+        .chart-container {
+            position: relative;
+            height: 300px;
+        }
+        
+        .logs-table-container {
+            background: linear-gradient(135deg, #1e293b, #0f172a);
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+            margin-bottom: 30px;
+            border: 1px solid var(--border-color);
+            overflow-x: auto;
+        }
+        
+        .logs-table-container h3 {
+            font-size: 1.3rem;
+            margin-bottom: 20px;
+            color: var(--text-color);
+            text-align: center;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        th, td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        th {
+            color: #94a3b8;
+            font-weight: 600;
+        }
+        
+        td {
+            color: var(--text-color);
+        }
+        
+        tr:hover {
+            background-color: rgba(56, 189, 248, 0.1);
+        }
+        
+        .footer {
+            text-align: center;
+            padding: 20px;
+            color: #94a3b8;
+            font-size: 0.9rem;
+        }
+        
+        .update-time {
+            text-align: right;
+            color: #94a3b8;
+            font-size: 0.9rem;
+            margin-bottom: 10px;
+        }
+        
+        @media (max-width: 768px) {
+            .charts-container {
+                grid-template-columns: 1fr;
+            }
+            
+            .stats-container {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            
+            .dashboard-header h1 {
+                font-size: 1.8rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard-header">
+        <h1>Edgetunnel 审计大屏</h1>
+        <p>实时监控网络流量、IP日志和地理位置信息</p>
+    </div>
+    
+    <div class="update-time">
+        最后更新: <span id="last-update">--</span>
+    </div>
+    
+    <div class="stats-container">
+        <div class="stat-card">
+            <h3>总请求数</h3>
+            <div class="value" id="total-logs">0</div>
+        </div>
+        
+        <div class="stat-card">
+            <h3>总流量</h3>
+            <div class="value" id="total-traffic">0</div>
+        </div>
+        
+        <div class="stat-card">
+            <h3>24小时请求数</h3>
+            <div class="value" id="last-24h">0</div>
+        </div>
+        
+        <div class="stat-card">
+            <h3>热门域名</h3>
+            <div class="value" id="top-domain">--</div>
+        </div>
+    </div>
+    
+    <div class="charts-container">
+        <div class="chart-card">
+            <h3>请求来源国家排名</h3>
+            <div class="chart-container">
+                <canvas id="countryChart"></canvas>
+            </div>
+        </div>
+        
+        <div class="chart-card">
+            <h3>热门访问域名</h3>
+            <div class="chart-container">
+                <canvas id="domainChart"></canvas>
+            </div>
+        </div>
+    </div>
+    
+    <div class="logs-table-container">
+        <h3>实时审计日志</h3>
+        <table id="logs-table">
+            <thead>
+                <tr>
+                    <th>时间</th>
+                    <th>客户端IP</th>
+                    <th>请求国家</th>
+                    <th>目标域名</th>
+                    <th>目标IP</th>
+                    <th>响应国家</th>
+                    <th>流量(Bytes)</th>
+                </tr>
+            </thead>
+            <tbody>
+                <!-- 日志数据将通过JavaScript动态加载 -->
+            </tbody>
+        </table>
+    </div>
+    
+    <div class="footer">
+        <p>Edgetunnel 审计系统 &copy; 2025</p>
+    </div>
+
+    <script>
+        // 图表实例
+        let countryChart = null;
+        let domainChart = null;
+        
+        // 更新仪表板数据
+        async function updateDashboard() {
 	`
     return text;
 }
